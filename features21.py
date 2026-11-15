@@ -157,7 +157,9 @@ class Features21:
         return None
     def feature_top_theme(self,tid):
         if tid is None:return 'Без определена серия'
-        themes={x['id']:x for x in self.db.rows('SELECT id,name,parent_id FROM themes')}
+        if not hasattr(self,'_theme_lookup_cache'):
+            self._theme_lookup_cache={x['id']:x for x in self.db.rows('SELECT id,name,parent_id FROM themes')}
+        themes=self._theme_lookup_cache
         current=tid;seen=set();ancestors=[]
         while current in themes and current not in seen:
             seen.add(current);item=themes[current];ancestors.append(item['name'])
@@ -359,6 +361,7 @@ class Features21:
             return all_themes,found
         def done(result):
             themes,found=result
+            self.__dict__.pop('_theme_lookup_cache',None)
             with self.db.db:
                 for t in themes:
                     self.db.db.execute('INSERT INTO themes(id,name,parent_id) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,parent_id=excluded.parent_id',(int(t['id']),t['name'],t.get('parent_id')))
