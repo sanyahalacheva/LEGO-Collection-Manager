@@ -43,6 +43,7 @@ jobs:
           python -m PyInstaller --noconfirm --clean --windowed --onedir --name "LEGO Collection Manager" --icon collector_icon.ico main.py
           python -m PyInstaller --noconfirm --clean --windowed --onefile --name "LEGO Updater" --icon collector_icon.ico --paths . updater.py
           Copy-Item "dist/LEGO Updater.exe" "dist/LEGO Collection Manager/LEGO Updater.exe"
+          Copy-Item "dist/LEGO Updater.exe" "dist/LEGO Collection Manager/_internal/updater_next.exe"
           Copy-Item collector_icon.ico,version.json,updates.json "dist/LEGO Collection Manager/"
       - name: Prepare archives and SHA-256
         shell: pwsh
