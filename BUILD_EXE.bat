@@ -19,6 +19,7 @@ if exist "dist\LEGO Collection Manager\data" (
 %PY% -m PyInstaller --noconfirm --clean --windowed --onedir --name "LEGO Collection Manager" --icon collector_icon.ico main.py || goto :error
 %PY% -m PyInstaller --noconfirm --clean --windowed --onefile --name "LEGO Updater" --icon collector_icon.ico --paths . updater.py || goto :error
 copy /Y "dist\LEGO Updater.exe" "dist\LEGO Collection Manager\LEGO Updater.exe" >nul || goto :error
+copy /Y "dist\LEGO Updater.exe" "dist\LEGO Collection Manager\_internal\updater_next.exe" >nul || goto :error
 copy /Y collector_icon.ico "dist\LEGO Collection Manager\collector_icon.ico" >nul || goto :error
 copy /Y version.json "dist\LEGO Collection Manager\version.json" >nul || goto :error
 copy /Y updates.json "dist\LEGO Collection Manager\updates.json" >nul || goto :error

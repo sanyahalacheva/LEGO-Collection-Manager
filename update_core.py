@@ -73,41 +73,81 @@ def db_backup(root):
     finally:source.close();target.close()
 
 
-def replace_app(root,staged,progress=None):
-    """Backup and replace program files; never touch data, updater, updates.json."""
+def _move_with_retry(source, destination, attempts=30, delay=0.5):
+    """Retry Windows sharing violations, never delete a locked file to force an update."""
+    error = None
+    for attempt in range(attempts):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            error = exc
+            # WinError 5 access denied, 32 sharing violation, 33 lock violation.
+            if getattr(exc, 'winerror', None) not in (5, 32, 33):
+                raise
+            if attempt != attempts-1:
+                time.sleep(delay)
+    raise error
+
+
+def replace_app(root, staged, progress=None):
+    """Transactional replacement of app files; data and updater remain untouched.
+
+    If a file is locked, retry its move; on failure restore everything moved.
+    A failed/partial rollback is retained on disk, never silently destroyed.
+    """
     root=Path(root).resolve();staged=Path(staged).resolve()
-    safe={'LEGO Collection Manager.exe','_internal','lego_icon.ico','collector_icon.ico','version.json'}
-    last_backup=root/'.previous_program'
-    temp_backup=root/'.update_rollback'
-    if temp_backup.exists():shutil.rmtree(temp_backup)
-    temp_backup.mkdir()
-    moved_old=[];moved_new=[]
+    safe=('LEGO Collection Manager.exe','_internal','lego_icon.ico','collector_icon.ico','version.json')
+    backup=root/'.update_rollback'
+    previous=root/'.previous_program'
+    if backup.exists():
+        raise RuntimeError('Намерено е предишно незавършено обновяване (.update_rollback). Не изтривай тази папка; направи резервно копие и потърси помощ.')
+    backup.mkdir()
+    moved_old=[]; moved_new=[]
     try:
         if progress:progress('Създавам резервно копие на базата…')
         db_backup(root)
-        # previous program is retained until next successful update.
-        if progress:progress('Заменям програмните файлове…')
+        if progress:progress('Изчаквам Windows да освободи програмните файлове…')
         for name in safe:
-            path=root/name
-            if path.exists():
-                os.replace(path,temp_backup/name)
+            source=root/name
+            if source.exists():
+                _move_with_retry(source,backup/name)
                 moved_old.append(name)
+        if progress:progress('Инсталирам новите програмни файлове…')
         for name in safe:
-            path=staged/name
-            if path.exists():
-                os.replace(path,root/name)
+            source=staged/name
+            if source.exists():
+                _move_with_retry(source,root/name)
                 moved_new.append(name)
-        if last_backup.exists():shutil.rmtree(last_backup)
-        os.replace(temp_backup,last_backup)
-    except Exception:
+    except Exception as error:
+        rollback_errors=[]
         for name in reversed(moved_new):
             path=root/name
-            if path.is_dir():shutil.rmtree(path)
-            elif path.exists():path.unlink()
+            try:
+                if path.is_dir():shutil.rmtree(path)
+                elif path.exists():path.unlink()
+            except OSError as exc:rollback_errors.append(f'{name}: {exc}')
         for name in moved_old:
-            path=temp_backup/name
-            if path.exists():os.replace(path,root/name)
+            old=backup/name
+            try:
+                if old.exists():_move_with_retry(old,root/name)
+            except OSError as exc:rollback_errors.append(f'{name}: {exc}')
+        # Do not erase backup in case Windows prevented recovery.
+        if not rollback_errors:
+            shutil.rmtree(backup)
+        else:
+            raise RuntimeError(f'Обновяването е неуспешно ({error}). Възстановяването е непълно: {rollback_errors}. Запази .update_rollback и data.') from error
         raise
+    # Failure to rotate the previous backup is NOT a reason to undo working files.
+    # Retain the newly created rollback if an old previous backup is locked.
+    if not previous.exists():
+        os.replace(backup,previous)
+    else:
+        try:
+            shutil.rmtree(previous)
+            os.replace(backup,previous)
+        except OSError:
+            pass  # The current update is installed; backup remains in .update_rollback.
 
 
 def repo_name(root):

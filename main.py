@@ -7,7 +7,7 @@ from datetime import datetime
 from urllib.parse import urlparse, quote
 import requests
 from PySide6.QtCore import QEvent, Qt, QByteArray, QObject, Signal, QRunnable, QThreadPool, QAbstractTableModel, QModelIndex, QSize, QTimer, QPoint, QRect
-from PySide6.QtGui import QPixmap, QIcon, QPainter, QColor, QFont, QDesktopServices, QPageSize, QTextDocument, QPen, QImage
+from PySide6.QtGui import QPixmap, QIcon, QPainter, QColor, QFont, QIntValidator, QDesktopServices, QPageSize, QTextDocument, QPen, QImage
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QStackedWidget, QSplitter, QTableView, QHeaderView, QMessageBox, QDialog, QDialogButtonBox, QSpinBox, QScrollArea,
     QGridLayout, QComboBox, QFrame, QFileDialog, QTabWidget, QCheckBox, QMenu, QSizePolicy, QFormLayout, QGroupBox,
@@ -1105,7 +1105,7 @@ class MainWindow(Features21, QMainWindow):
         try:
             shown_version=json.loads((PROGRAM_DIR/'version.json').read_text(encoding='utf8')).get('version','2.0.1')
         except (OSError,ValueError):
-            shown_version='2.1.10'
+            shown_version='2.1.11'
         self.shown_version=shown_version
         self.setWindowTitle('LEGO Collection Manager '+shown_version);self.setWindowIcon(QIcon(str(PROGRAM_DIR / 'collector_icon.ico')));self.resize(1450,900);self.setMinimumSize(840,600)
         self.feature_init();self.build_ui()
@@ -1309,7 +1309,7 @@ class MainWindow(Features21, QMainWindow):
         v.addWidget(card2)
         card3,c3=panel_layout()
         c3.addWidget(label('Обновления'))
-        c3.addWidget(label('Версия: '+str(getattr(self,'shown_version','2.1.10')),muted=True))
+        c3.addWidget(label('Версия: '+str(getattr(self,'shown_version','2.1.11')),muted=True))
         c3.addWidget(label('Проверка през GitHub или инсталиране от проверен ZIP архив. Папката data не се подменя.',muted=True))
         updater_row=QHBoxLayout()
         updater_row.addWidget(compact_action(make_button('Провери за обновление',self.launch_updater)))
@@ -1774,14 +1774,16 @@ class MainWindow(Features21, QMainWindow):
             controls=QHBoxLayout();controls.setSpacing(5)
             minus=make_button('−');plus=make_button('+')
             compact_action(minus,31);compact_action(plus,31)
-            qty=QSpinBox();qty.setRange(0,int(p['required']));qty.setValue(int(p['owned']))
-            qty.setButtonSymbols(QSpinBox.NoButtons);qty.setKeyboardTracking(False)
-            qty.setAlignment(Qt.AlignCenter);qty.setFixedWidth(70);qty.setFixedHeight(32)
-            # Explicit palette and editor CSS: on Windows some native QSpinBox themes
-            # paint white text over a white background without this override.
-            qty.setStyleSheet('QSpinBox {background:#FFFFFF; color:#1D2936; border:1px solid #B9C6D2; border-radius:6px; padding:2px; font-size:13px; font-weight:650;} QSpinBox:disabled {color:#68788B;background:#F3F5F7;}')
-            qty.lineEdit().setStyleSheet('color:#1D2936;background:transparent;border:0px;font-size:13px;font-weight:650;')
-            qty.setToolTip('Налични бройки (можеш да въведеш число)')
+            # Plain editable line edit rather than QSpinBox: some Windows/Fusion
+            # styles render the internal spin-box editor text invisibly.
+            qty=QLineEdit(str(int(p['owned'])))
+            qty.setObjectName('partQuantityEditor')
+            qty.setAlignment(Qt.AlignCenter)
+            qty.setFixedSize(68,32)
+            qty.setMaxLength(8)
+            qty.setValidator(QIntValidator(0,int(p['required']),qty))
+            qty.setStyleSheet('QLineEdit#partQuantityEditor { background: #FFFFFF; color: #1D2936; border: 1px solid #B9C6D2; border-radius: 6px; padding: 2px 5px; font-size: 14px; font-weight: 600; selection-background-color: #D9E5F1; } QLineEdit#partQuantityEditor:disabled { color: #68788B; background: #F3F5F7; }')
+            qty.setToolTip('Напиши директно наличния брой, например 80, и натисни Enter или Tab.')
             controls.addStretch();controls.addWidget(minus);controls.addWidget(qty);controls.addWidget(plus);controls.addStretch()
             fl.addLayout(controls)
             checked=QCheckBox('Всички налични')
@@ -1797,8 +1799,9 @@ class MainWindow(Features21, QMainWindow):
             for ctl in (minus,plus,qty,checked):ctl.setEnabled(can_edit)
             if not can_edit:
                 info.setToolTip('Започни проверка, за да отбелязваш наличните части.' if not self.current_set['started'] else 'Алтернативите не се броят отделно.')
-            def change_count(value,part=p,indicator_update=update_info):
+            def change_count(value,part=p,indicator_update=update_info,editor=qty):
                 value=max(0,min(int(value),int(part['required'])))
+                editor.setText(str(value))
                 if value==int(part['owned']):return
                 self.db.set_owned(part['id'],value)
                 self.metrics.track('part_checked')
@@ -1809,10 +1812,16 @@ class MainWindow(Features21, QMainWindow):
                         self.part_model.dataChanged.emit(self.part_model.index(row,4),self.part_model.index(row,9))
                         break
                 self.on_data_changed(False)
-            qty.valueChanged.connect(change_count)
-            minus.clicked.connect(lambda _checked=False,s=qty:s.setValue(s.value()-1))
-            plus.clicked.connect(lambda _checked=False,s=qty:s.setValue(s.value()+1))
-            checked.toggled.connect(lambda value,s=qty,n=p['required']:s.setValue(n if value else 0))
+            def entered_count(editor=qty,part=p,save=change_count):
+                raw=editor.text().strip()
+                save(int(raw) if raw.isdecimal() else part['owned'])
+            qty.editingFinished.connect(entered_count)
+            # Clicking +/- first commits any number currently typed in the field.
+            minus.clicked.connect(lambda _checked=False,editor=qty,part=p,save=change_count:
+                                  save(max(0,int(editor.text()) if editor.text().isdecimal() else part['owned'])-1))
+            plus.clicked.connect(lambda _checked=False,editor=qty,part=p,save=change_count:
+                                 save((int(editor.text()) if editor.text().isdecimal() else part['owned'])+1))
+            checked.toggled.connect(lambda value,part=p,save=change_count:save(part['required'] if value else 0))
             if mode=='Карти':
                 fl.addWidget(compact_action(make_button('Подробности / Премести',lambda _checked=False,part=p:self.edit_part(part))))
             if p['owned']>=p['required'] and self.current_set['started']:
