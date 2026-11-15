@@ -24,25 +24,30 @@ def wait_for_exit(pid,timeout=65):
 
 
 class Updater:
-    def __init__(self,root,pid=0):
-        self.target=root;self.pid=pid;self.events=queue.Queue();self.running=False
-        self.win=tk.Tk();self.win.title('LEGO Collection Manager — Обновяване');self.win.geometry('630x340');self.win.minsize(565,310)
+    def __init__(self,root,pid=0,auto=False,offline=False):
+        self.target=root;self.pid=pid;self.auto=auto;self.offline=offline;self.events=queue.Queue();self.running=False
+        self.win=tk.Tk();self.win.title('LEGO Collection Manager — Обновяване');self.win.geometry('630x300');self.win.minsize(565,275)
         self.win.configure(bg='#f7f9fd')
         container=ttk.Frame(self.win,padding=22);container.pack(fill='both',expand=True)
         ttk.Label(container,text='Обновяване на LEGO Collection Manager',font=('Segoe UI',15,'bold')).pack(anchor='w')
         self.current=read_version(root)
         ttk.Label(container,text=f'Инсталирана версия: {self.current}    ·    Данните в data не се заменят.',wraplength=560).pack(anchor='w',pady=(10,13))
         row=ttk.Frame(container);row.pack(fill='x')
-        self.online=ttk.Button(row,text='Провери GitHub',command=self.check);self.online.pack(side='left',padx=(0,12))
-        self.offline=ttk.Button(row,text='Обнови от ZIP файл…',command=self.offline_pick);self.offline.pack(side='left')
+        self.online=ttk.Button(row,text='Провери GitHub',command=self.check)
+        if not auto:self.online.pack(side='left',padx=(0,12))
+        self.offline=ttk.Button(row,text='Обнови от ZIP файл…',command=self.offline_pick)
+        if not auto:self.offline.pack(side='left')
         self.status=tk.StringVar(value='Можеш да провериш онлайн или да избереш официален ZIP от флашка.')
         ttk.Label(container,textvariable=self.status,wraplength=560).pack(anchor='w',pady=(19,10))
         self.progress=ttk.Progressbar(container,mode='indeterminate');self.progress.pack(fill='x',pady=(0,12))
         self.install_btn=ttk.Button(container,text='Инсталирай намерената версия',command=self.install_online)
-        self.install_btn.pack(anchor='w');self.install_btn.state(['disabled'])
+        if not auto:self.install_btn.pack(anchor='w')
+        self.install_btn.state(['disabled'])
         self.available=None
         ttk.Label(container,text='При неуспешно обновяване старите програмни файлове се възстановяват.\nПреди първото обновяване запази копие на цялата папка.',wraplength=560).pack(anchor='w',pady=(14,0))
         self.win.after(120,self.poll)
+        if auto: self.win.after(150,self.auto_update)
+        if offline: self.win.after(150,self.offline_pick)
     def busy(self,value):
         self.running=value
         for button in [self.online,self.offline]:button.state(['disabled'] if value else ['!disabled'])
@@ -63,7 +68,7 @@ class Updater:
                 elif what=='done':
                     self.busy(False)
                     if value=='installed':
-                        messagebox.showinfo('Готово','Обновяването завърши успешно. Стартирам LEGO Manager.')
+                        if not self.auto: messagebox.showinfo('Готово','Обновяването завърши успешно. Стартирам LEGO Manager.')
                         exe=self.target/'LEGO Collection Manager.exe'
                         if exe.exists():subprocess.Popen([str(exe)],cwd=str(self.target))
                         self.win.destroy();return
@@ -72,14 +77,35 @@ class Updater:
                         self.status.set('Налична версия '+value[0])
                         if parse_version(value[0])>parse_version(self.current):
                             self.install_btn.state(['!disabled'])
-                            messagebox.showinfo('Нова версия',f'Има версия {value[0]}. Натисни „Инсталирай“.')
+                            if self.auto:
+                                self.win.after(10,self.install_online)
+                            else:
+                                messagebox.showinfo('Нова версия',f'Има версия {value[0]}. Натисни „Инсталирай“.')
                         else:
                             self.install_btn.state(['disabled'])
                             self.status.set('Вече използваш последната версия ('+self.current+').')
+                            if self.auto:
+                                self.restart_app_and_quit()
+                                return
                 elif what=='error':
-                    self.busy(False);self.status.set('Грешка: '+value);messagebox.showerror('Неуспешно обновяване',value)
+                    self.busy(False);self.status.set('Грешка: '+value)
+                    messagebox.showerror('Неуспешно обновяване',value)
+                    if self.auto:
+                        self.restart_app_and_quit()
+                        return
         except queue.Empty:pass
         self.win.after(120,self.poll)
+    def restart_app_and_quit(self):
+        exe=self.target/'LEGO Collection Manager.exe'
+        if exe.exists():
+            try: subprocess.Popen([str(exe)],cwd=str(self.target))
+            except OSError: pass
+        self.win.destroy()
+
+    def auto_update(self):
+        self.status.set('Проверявам новата версия…')
+        self.worker(lambda: github_latest(self.target))
+
     def check(self):
         self.status.set('Проверявам GitHub…')
         self.worker(lambda:github_latest(self.target))
@@ -97,7 +123,7 @@ class Updater:
     def install_online(self):
         if not self.available:return
         version,urls,_=self.available
-        if not messagebox.askyesno('Обновяване',f'Инсталиране на версия {version}?\nLEGO Manager ще бъде затворен. Данните се запазват.'):
+        if not self.auto and not messagebox.askyesno('Обновяване',f'Инсталиране на версия {version}?\nLEGO Manager ще бъде затворен. Данните се запазват.'):
             return
         self.status.set('Изтеглям и проверявам файловете…')
         def run():
@@ -124,5 +150,7 @@ class Updater:
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--pid',type=int,default=0)
+    parser.add_argument('--auto', action='store_true')
+    parser.add_argument('--offline', action='store_true')
     args=parser.parse_args()
-    Updater(ROOT,args.pid).mainloop()
+    Updater(ROOT,args.pid,auto=args.auto,offline=args.offline).mainloop()

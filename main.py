@@ -1119,6 +1119,7 @@ class MainWindow(Features21, QMainWindow):
         self.loose_sync_timer.timeout.connect(self.sync_loose_images)
         self.loose_sync_timer.start()
         QTimer.singleShot(4000, self.sync_loose_images)
+        QTimer.singleShot(2500, self.upgrade_updater_after_restart)
         QTimer.singleShot(9500, self.check_update_silent)
     def build_ui(self):
         root=QWidget();root.setObjectName('root');self.setCentralWidget(root)
@@ -1292,7 +1293,11 @@ class MainWindow(Features21, QMainWindow):
         card3,c3=panel_layout()
         c3.addWidget(label('Обновления'))
         c3.addWidget(label('Проверка през GitHub или инсталиране от проверен ZIP архив. Папката data не се подменя.',muted=True))
-        c3.addWidget(compact_action(make_button('Провери за обновление',self.launch_updater)),0,Qt.AlignLeft)
+        updater_row=QHBoxLayout()
+        updater_row.addWidget(compact_action(make_button('Провери за обновление',self.launch_updater)))
+        updater_row.addWidget(compact_action(make_button('Офлайн обновяване от ZIP',self.launch_offline_updater)))
+        updater_row.addStretch()
+        c3.addLayout(updater_row)
         v.addWidget(card3)
         metrics_card,mc=panel_layout()
         mc.addWidget(label('Анонимна статистика за използването'))
@@ -1312,34 +1317,104 @@ class MainWindow(Features21, QMainWindow):
         if enabled:
             self.metrics.track('consent_enabled')
 
-    def launch_updater(self):
-        updater=PROGRAM_DIR / 'LEGO Updater.exe'
-        if not updater.is_file():
-            QMessageBox.information(self,'Обновяване',
-                'Updater-ът е наличен в portable EXE пакета, не в Python тестовия режим. '
-                'Изгради пакета чрез BUILD_EXE.bat.')
+    def _updater_path(self):
+        return PROGRAM_DIR / 'LEGO Updater.exe'
+
+    def upgrade_updater_after_restart(self):
+        """Activate updater binary staged within _internal by an older updater.
+
+        Runs after an update; retries while the old onefile updater is still active.
+        Crucially this does not touch the user data directory or its database.
+        """
+        if not getattr(sys, 'frozen', False):
+            return
+        staged = PROGRAM_DIR / '_internal' / 'updater_next.exe'
+        active = self._updater_path()
+        if not staged.is_file():
             return
         try:
-            subprocess.Popen([str(updater),'--pid',str(os.getpid())],cwd=str(PROGRAM_DIR))
-        except OSError as e:
-            QMessageBox.warning(self,'Обновяване',str(e))
+            os.replace(staged, active)  # Windows refuses while active updater.exe is open
+        except OSError:
+            retries = getattr(self, '_updater_swap_retries', 0)
+            if retries < 30:
+                self._updater_swap_retries = retries + 1
+                QTimer.singleShot(1000, self.upgrade_updater_after_restart)
+            else:
+                self.statusBar().showMessage('Updater ще се обнови при следващото стартиране.', 8000)
+
+    def _confirm_update(self, found):
+        from update_core import parse_version, read_version
+        try:
+            latest = found[0]
+            if parse_version(latest) <= parse_version(read_version(PROGRAM_DIR)):
+                QMessageBox.information(self, 'Обновяване', 'Вече използваш последната версия.')
+                return
+        except (ValueError, IndexError, TypeError) as error:
+            QMessageBox.warning(self, 'Обновяване', str(error))
+            return
+        result = QMessageBox.question(
+            self, 'Нова версия',
+            f'Налична е версия {latest}.\n\n'
+            'Да я изтегля и инсталирам сега? Програмата ще се затвори и отвори отново. '
+            'Колекцията и снимките няма да се заменят.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if result == QMessageBox.Yes:
+            self._start_auto_update()
+
+    def _start_auto_update(self):
+        updater = self._updater_path()
+        if not updater.is_file():
+            QMessageBox.information(self, 'Обновяване',
+                'Updater е наличен в Windows EXE пакета, не в Python тестовия режим.')
+            return
+        try:
+            subprocess.Popen([str(updater), '--auto', '--pid', str(os.getpid())],
+                             cwd=str(PROGRAM_DIR))
+        except OSError as error:
+            QMessageBox.warning(self, 'Обновяване', str(error))
+            return
+        # The updater owns downloads, exit waiting, backups and restart.
+        # Exit the app from its Qt event loop so SQLite is committed by closeEvent.
+        QTimer.singleShot(0, self.close)
+
+    def launch_updater(self):
+        """One click check in settings, with exactly one confirmation dialog."""
+        if not self._updater_path().is_file():
+            QMessageBox.information(self, 'Обновяване',
+                'Тази функция е за Windows EXE пакета, не за Python режима.')
+            return
+        self.statusBar().showMessage('Проверявам GitHub за нова версия…', 5000)
+        from update_core import github_latest
+        self.run_task(lambda: github_latest(PROGRAM_DIR, timeout=10),
+                      self._confirm_update,
+                      on_error=lambda error: QMessageBox.warning(self, 'Неуспешна проверка', str(error)))
+
+    def launch_offline_updater(self):
+        updater = self._updater_path()
+        if not updater.is_file():
+            QMessageBox.information(self, 'Обновяване', 'Офлайн обновяването изисква Windows EXE.')
+            return
+        try:
+            subprocess.Popen([str(updater), '--offline', '--pid', str(os.getpid())],
+                             cwd=str(PROGRAM_DIR))
+        except OSError as error:
+            QMessageBox.warning(self, 'Обновяване', str(error))
 
     def check_update_silent(self):
-        # Non-blocking, best-effort check. The user can continue offline.
-        if not (PROGRAM_DIR/'LEGO Updater.exe').exists():return
+        if not self._updater_path().exists():
+            return
         try:
             from update_core import github_latest, parse_version, read_version
         except ImportError:
             return
-        def done(found):
+        def on_found(found):
             try:
-                if parse_version(found[0])<=parse_version(read_version(PROGRAM_DIR)):return
-                answer=QMessageBox.question(self,'Налична е нова версия',
-                    f'Налична е версия {found[0]}. Да отворя прозореца за обновяване?')
-                if answer==QMessageBox.Yes:self.launch_updater()
-            except (ValueError,RuntimeError):pass
-        # A failed check is intentionally silent (offline computers).
-        self.run_task(lambda:github_latest(PROGRAM_DIR,timeout=7),done,on_error=lambda error:None)
+                if parse_version(found[0]) > parse_version(read_version(PROGRAM_DIR)):
+                    self._confirm_update(found)
+            except (ValueError, RuntimeError, TypeError):
+                pass
+        self.run_task(lambda: github_latest(PROGRAM_DIR, timeout=7),
+                      on_found, on_error=lambda error: None)
 
     def check_and_save_key(self):
         candidate=self.key_entry.text().strip()
