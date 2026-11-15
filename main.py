@@ -1,6 +1,6 @@
 """LEGO Collection Manager — offline-first desktop manager (Bulgarian UI)."""
 from __future__ import annotations
-import json, os, sys, sqlite3, shutil, time, html, re, hashlib, subprocess
+import json, os, sys, sqlite3, shutil, time, html, re, hashlib, subprocess, uuid, threading
 from collections import OrderedDict
 from pathlib import Path
 from datetime import datetime
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 from PySide6.QtSvg import QSvgRenderer
 from features21 import Features21
+from usage_metrics import UsageMetrics
 
 # Portable storage: next to main.py in development, next to .exe when frozen.
 PROGRAM_DIR = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
@@ -174,7 +175,7 @@ QFrame#sidebar QLabel {background:transparent;color:#DDE5ED;}
 QFrame#sidebar QLabel#sidebarBrand {font-size:18px;font-weight:800;color:#FFFFFF;}
 QFrame#sidebar QLabel#sidebarNote {font-size:11px;color:#97A6B5;}
 QLabel#brandMark {background:transparent;border:none;}
-QLineEdit,QSpinBox,QComboBox {background:#FFFFFF;border:1px solid #DCE3E9;padding:6px 8px;border-radius:8px;selection-background-color:#F3DCE0;}
+QLineEdit,QSpinBox,QComboBox {background:#FFFFFF;color:#243344;border:1px solid #DCE3E9;padding:6px 8px;border-radius:8px;selection-background-color:#F3DCE0;}
 QLineEdit:focus,QSpinBox:focus,QComboBox:focus {border:1px solid #C84B53;}
 QTableView {background:#FFFFFF;alternate-background-color:#FBFCFD;gridline-color:#EDF0F2;border:1px solid #E0E5EA;border-radius:12px;selection-background-color:#FCE8EA;selection-color:#253340;}
 QHeaderView::section {background:#F4F6F8;padding:7px;border:none;border-bottom:1px solid #E3E8ED;font-weight:700;color:#526172;}
@@ -520,7 +521,10 @@ class Api:
         try: return json.loads(SETTINGS_PATH.read_text(encoding='utf8'))
         except (FileNotFoundError,ValueError): return {}
     def save_key(self,k):
-        self.key=k.strip(); SETTINGS_PATH.write_text(json.dumps({'api_key':self.key},ensure_ascii=False),encoding='utf8')
+        self.key=k.strip()
+        settings=self.settings()
+        settings['api_key']=self.key
+        SETTINGS_PATH.write_text(json.dumps(settings,ensure_ascii=False,indent=2),encoding='utf8')
     @staticmethod
     def check_key(candidate):
         """Validate without persisting the candidate key."""
@@ -1094,7 +1098,7 @@ class LoosePartSearchDialog(QDialog):
 
 class MainWindow(Features21, QMainWindow):
     def __init__(self):
-        super().__init__();self.db=Store();self.api=Api();self.pool=QThreadPool(self);self.pool.setMaxThreadCount(4);self.images=Images(self.pool)
+        super().__init__();self.db=Store();self.api=Api();self.metrics=UsageMetrics(SETTINGS_PATH,PROGRAM_DIR);self.pool=QThreadPool(self);self.pool.setMaxThreadCount(4);self.images=Images(self.pool)
         self.images.updated.connect(self.refresh_pictures)
         self.current_set=None;self.search_results=[];self.current_parts=[];self.view_mode='Таблица';self.page=0;self.page_size=36
         try:
@@ -1103,6 +1107,7 @@ class MainWindow(Features21, QMainWindow):
             shown_version='2.1.6'
         self.setWindowTitle('LEGO Collection Manager '+shown_version);self.setWindowIcon(QIcon(str(PROGRAM_DIR / 'collector_icon.ico')));self.resize(1450,900);self.setMinimumSize(840,600)
         self.feature_init();self.build_ui();self.show_sets()
+        self.metrics.track("launch")
         # On first launch guide the user, but never lock access to offline sets.
         self.navigate(1 if self.api.key else 5)
         # Periodically try to resolve pictures of manually entered loose parts.
@@ -1288,9 +1293,24 @@ class MainWindow(Features21, QMainWindow):
         c3.addWidget(label('Обновления'))
         c3.addWidget(label('Проверка през GitHub или инсталиране от проверен ZIP архив. Папката data не се подменя.',muted=True))
         c3.addWidget(compact_action(make_button('Провери за обновление',self.launch_updater)),0,Qt.AlignLeft)
-        v.addWidget(card3);v.addStretch()
+        v.addWidget(card3)
+        metrics_card,mc=panel_layout()
+        mc.addWidget(label('Анонимна статистика за използването'))
+        mc.addWidget(label('По желание: изпраща само броя стартирания, добавени комплекти и проверки на части. Не изпраща номера на LEGO, колекция, снимки или API ключ.',muted=True))
+        self.metrics_consent=QCheckBox('Разрешавам изпращане на анонимна статистика')
+        self.metrics_consent.setChecked(self.metrics.enabled)
+        self.metrics_consent.toggled.connect(self.toggle_usage_metrics)
+        mc.addWidget(self.metrics_consent)
+        mc.addWidget(label('Може да откажеш по всяко време. Без свързана статистическа услуга нищо не се изпраща.',muted=True))
+        v.addWidget(metrics_card)
+        v.addStretch()
         scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(page);enable_touch_scroll(scroll)
         self.stack.addWidget(scroll)
+
+    def toggle_usage_metrics(self, enabled):
+        self.metrics.set_enabled(enabled)
+        if enabled:
+            self.metrics.track('consent_enabled')
 
     def launch_updater(self):
         updater=PROGRAM_DIR / 'LEGO Updater.exe'
@@ -1461,6 +1481,7 @@ class MainWindow(Features21, QMainWindow):
             if not parts:
                 QMessageBox.warning(self,'Празен инвентар','API не върна части. Комплектът не е добавен.');return
             sid=self.db.add_set(entry,parts)
+            self.metrics.track('set_added')
             self.feature_register_theme(sid,entry)
             self.search_status.setText(f'Добавен е комплект {entry["set_num"]} · {len(parts)} записа в API')
             self.show_sets();self.refresh_search_cards();self.open_set(sid)
@@ -1662,7 +1683,11 @@ class MainWindow(Features21, QMainWindow):
             compact_action(minus,31);compact_action(plus,31)
             qty=QSpinBox();qty.setRange(0,int(p['required']));qty.setValue(int(p['owned']))
             qty.setButtonSymbols(QSpinBox.NoButtons);qty.setKeyboardTracking(False)
-            qty.setAlignment(Qt.AlignCenter);qty.setFixedWidth(62);qty.setFixedHeight(31)
+            qty.setAlignment(Qt.AlignCenter);qty.setFixedWidth(70);qty.setFixedHeight(32)
+            # Explicit palette and editor CSS: on Windows some native QSpinBox themes
+            # paint white text over a white background without this override.
+            qty.setStyleSheet('QSpinBox {background:#FFFFFF; color:#1D2936; border:1px solid #B9C6D2; border-radius:6px; padding:2px; font-size:13px; font-weight:650;} QSpinBox:disabled {color:#68788B;background:#F3F5F7;}')
+            qty.lineEdit().setStyleSheet('color:#1D2936;background:transparent;border:0px;font-size:13px;font-weight:650;')
             qty.setToolTip('Налични бройки (можеш да въведеш число)')
             controls.addStretch();controls.addWidget(minus);controls.addWidget(qty);controls.addWidget(plus);controls.addStretch()
             fl.addLayout(controls)
@@ -1683,6 +1708,7 @@ class MainWindow(Features21, QMainWindow):
                 value=max(0,min(int(value),int(part['required'])))
                 if value==int(part['owned']):return
                 self.db.set_owned(part['id'],value)
+                self.metrics.track('part_checked')
                 part['owned']=value
                 indicator_update()
                 for row,part_ref in enumerate(self.part_model.items):
@@ -1759,7 +1785,7 @@ class MainWindow(Features21, QMainWindow):
         if not self.current_set['started'] or p['alternate']:
             QMessageBox.information(self,'Проверка','Първо започни проверката; алтернативите не се броят отделно.');return
         n=p['owned']+(-1 if idx.column()==7 else (1 if idx.column()==8 else p['required']-p['owned']))
-        self.db.set_owned(p['id'],n);p['owned']=max(0,min(p['required'],n))
+        self.db.set_owned(p['id'],n);self.metrics.track('part_checked');p['owned']=max(0,min(p['required'],n))
         self.part_model.dataChanged.emit(self.part_model.index(idx.row(),4),self.part_model.index(idx.row(),9))
         self.on_data_changed(False)
     def table_clicked(self,idx):
