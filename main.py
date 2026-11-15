@@ -1105,11 +1105,9 @@ class MainWindow(Features21, QMainWindow):
         try:
             shown_version=json.loads((PROGRAM_DIR/'version.json').read_text(encoding='utf8')).get('version','2.0.1')
         except (OSError,ValueError):
-            shown_version='2.1.9'
+            shown_version='2.1.10'
         self.shown_version=shown_version
         self.setWindowTitle('LEGO Collection Manager '+shown_version);self.setWindowIcon(QIcon(str(PROGRAM_DIR / 'collector_icon.ico')));self.resize(1450,900);self.setMinimumSize(840,600)
-        from recent_sets import RecentSets
-        self.recent_sets = RecentSets(APP_DIR / 'recent_sets.json')
         self.feature_init();self.build_ui()
         self.metrics.track("launch")
         # On first launch guide the user, but never lock access to offline sets.
@@ -1139,32 +1137,6 @@ class MainWindow(Features21, QMainWindow):
                 self.show_sets()
         except Exception as exc:
             self.statusBar().showMessage(f'Фоново зареждане: {exc}', 6000)
-
-    def refresh_recent_sets(self):
-        """A small strip above the collection; no database migrations or duplicate merging."""
-        if not hasattr(self,'recent_layout'):
-            return
-        self.clear_layout(self.recent_layout)
-        valid=[]
-        for sid in self.recent_sets.ids:
-            data=self.db.row('SELECT id,set_num,name,image,started FROM sets WHERE id=?',(sid,))
-            if data:valid.append(data)
-        self.recent_panel.setVisible(bool(valid))
-        if not valid:return
-        for entry in valid:
-            sid=entry['id']
-            tile=QFrame();tile.setObjectName('recentTile');tile.setFixedWidth(240)
-            tile.setSizePolicy(QSizePolicy.Fixed,QSizePolicy.Preferred)
-            layout=QHBoxLayout(tile);layout.setContentsMargins(8,6,8,6);layout.setSpacing(7)
-            layout.addWidget(picture(self.images, entry['image'], 54, 48))
-            texts=QVBoxLayout();texts.setSpacing(2)
-            num=label(html.escape(entry['set_num']));num.setObjectName('statusCount');texts.addWidget(num)
-            title=label(html.escape(entry['name'][:32] + ('…' if len(entry['name'])>32 else '')),muted=True)
-            title.setToolTip(entry['name']);texts.addWidget(title)
-            layout.addLayout(texts,1)
-            button=make_button('Отвори',lambda checked=False,x=sid:self.open_set(x))
-            compact_action(button);layout.addWidget(button)
-            self.recent_layout.addWidget(tile)
 
     def build_ui(self):
         root=QWidget();root.setObjectName('root');self.setCentralWidget(root)
@@ -1245,18 +1217,6 @@ class MainWindow(Features21, QMainWindow):
         page=QWidget();v=QVBoxLayout(page)
         h=QHBoxLayout();h.addWidget(label('Моите LEGO',heading=True));h.addStretch()
         self.feature_set_header(h);h.addWidget(make_button('＋ Добави комплект',lambda:self.navigate(0),True));v.addLayout(h)
-        self.recent_panel=QFrame();self.recent_panel.setObjectName('recentPanel')
-        rv=QVBoxLayout(self.recent_panel);rv.setContentsMargins(10,8,10,10);rv.setSpacing(7)
-        rv.addWidget(label('Наскоро отваряни LEGO',heading=False))
-        self.recent_scroll=QScrollArea();self.recent_scroll.setWidgetResizable(True)
-        self.recent_scroll.setFixedHeight(85)
-        self.recent_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        recent_host=QWidget();self.recent_layout=QHBoxLayout(recent_host)
-        self.recent_layout.setSpacing(8);self.recent_layout.setContentsMargins(2,2,2,2)
-        self.recent_layout.setAlignment(Qt.AlignLeft)
-        self.recent_scroll.setWidget(recent_host);enable_touch_scroll(self.recent_scroll)
-        rv.addWidget(self.recent_scroll)
-        self.recent_panel.hide();v.addWidget(self.recent_panel)
         self.sets_scroll=QScrollArea();self.sets_scroll.setWidgetResizable(True)
         self.sets_host=QWidget();self.sets_grid=QGridLayout(self.sets_host);self.sets_grid.setSpacing(15);self.sets_grid.setAlignment(Qt.AlignTop)
         self.sets_scroll.setWidget(self.sets_host);enable_touch_scroll(self.sets_scroll);v.addWidget(self.sets_scroll);self.stack.addWidget(page)
@@ -1349,7 +1309,7 @@ class MainWindow(Features21, QMainWindow):
         v.addWidget(card2)
         card3,c3=panel_layout()
         c3.addWidget(label('Обновления'))
-        c3.addWidget(label('Версия: '+str(getattr(self,'shown_version','2.1.9')),muted=True))
+        c3.addWidget(label('Версия: '+str(getattr(self,'shown_version','2.1.10')),muted=True))
         c3.addWidget(label('Проверка през GitHub или инсталиране от проверен ZIP архив. Папката data не се подменя.',muted=True))
         updater_row=QHBoxLayout()
         updater_row.addWidget(compact_action(make_button('Провери за обновление',self.launch_updater)))
@@ -1627,7 +1587,6 @@ class MainWindow(Features21, QMainWindow):
             elif item.layout(): MainWindow.clear_layout(item.layout())
     def show_sets(self):
         self.feature_show_sets()
-        self.refresh_recent_sets()
 
     def confirm_delete_set(self,sid):
         entry=self.db.row('SELECT * FROM sets WHERE id=?',(sid,))
@@ -1665,7 +1624,6 @@ class MainWindow(Features21, QMainWindow):
                 self.set_window.close()
             self.current_set=None
             self.current_parts=[]
-        self.recent_sets.forget(sid)
         self.show_sets()
         self.refresh_search_cards()
         if self.stack.currentIndex()==2:self.show_missing()
@@ -1676,8 +1634,6 @@ class MainWindow(Features21, QMainWindow):
     def open_set(self,sid):
         self.current_set=self.db.row('SELECT * FROM sets WHERE id=?',(sid,))
         if not self.current_set:return
-        self.recent_sets.record(sid)
-        self.refresh_recent_sets()
         if hasattr(self,'set_window') and self.set_window.isVisible():self.set_window.close()
         self.set_window=QDialog(self);self.set_window.setWindowTitle(f'{self.current_set["set_num"]} · {self.current_set["name"]}')
         self.set_window.setMinimumSize(760,560);self.set_window.resize(1240,780)
