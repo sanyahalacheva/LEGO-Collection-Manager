@@ -1,0 +1,65 @@
+name: Windows release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number, e.g. 2.0.1 (without v)'
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*.*.*'
+permissions:
+  contents: write
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare release metadata
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $version = '${{ inputs.version }}' -replace '^v',''
+          } else {
+            $version = '${{ github.ref_name }}' -replace '^v',''
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be X.Y.Z' }
+          "tag=v$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          @{ version=$version; schema_version=3 } | ConvertTo-Json -Compress | Set-Content -Encoding utf8 version.json
+          @{ repo='${{ github.repository }}' } | ConvertTo-Json -Compress | Set-Content -Encoding utf8 updates.json
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt "pyinstaller>=6,<7"
+      - name: Build program
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name "LEGO Collection Manager" --icon collector_icon.ico main.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --name "LEGO Updater" --icon collector_icon.ico --paths . updater.py
+          Copy-Item "dist/LEGO Updater.exe" "dist/LEGO Collection Manager/LEGO Updater.exe"
+          Copy-Item collector_icon.ico,version.json,updates.json "dist/LEGO Collection Manager/"
+      - name: Prepare archives and SHA-256
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory "release-updates" | Out-Null
+          Copy-Item "dist/LEGO Collection Manager/LEGO Collection Manager.exe" "release-updates/"
+          Copy-Item "dist/LEGO Collection Manager/_internal" "release-updates/_internal" -Recurse
+          Copy-Item "dist/LEGO Collection Manager/version.json","dist/LEGO Collection Manager/collector_icon.ico" "release-updates/"
+          Compress-Archive -Path "release-updates/*" -DestinationPath "LEGO-Collection-Manager-UPDATE.zip" -CompressionLevel Optimal
+          $sha = (Get-FileHash "LEGO-Collection-Manager-UPDATE.zip" -Algorithm SHA256).Hash.ToLower()
+          "$sha  LEGO-Collection-Manager-UPDATE.zip" | Set-Content -Encoding ascii "LEGO-Collection-Manager-UPDATE.zip.sha256"
+          New-Item -ItemType Directory "dist/LEGO Collection Manager/data/images" -Force | Out-Null
+          New-Item -ItemType Directory "dist/LEGO Collection Manager/data/backups" -Force | Out-Null
+          Compress-Archive -Path "dist/LEGO Collection Manager" -DestinationPath "LEGO-Collection-Manager-PORTABLE.zip" -CompressionLevel Optimal
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:tag" "LEGO-Collection-Manager-PORTABLE.zip" "LEGO-Collection-Manager-UPDATE.zip" "LEGO-Collection-Manager-UPDATE.zip.sha256" --title "LEGO Collection Manager $env:tag" --generate-notes --latest
